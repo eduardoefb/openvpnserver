@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/python3
 
 import sys
 
@@ -17,7 +17,7 @@ cn = x509.replace(",", " ").replace(" = ", "=").split("CN=")[1].split()[0]
 fp = open(whitelist_file, "r")
 
 for f in fp.readlines():
-   if f.strip() == cn.strip():server.conf server.conf 
+   if f.strip() == cn.strip():		
       sys.exit(0)
 
 fp.close()
