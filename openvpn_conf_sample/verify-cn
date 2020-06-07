@@ -11,7 +11,7 @@ x509 = str(sys.argv[3])
 
 if depth == -1:
    sys.exit(0)
-server.conf 
+
 cn = x509.replace(",", " ").replace(" = ", "=").split("CN=")[1].split()[0]
 
 fp = open(whitelist_file, "r")

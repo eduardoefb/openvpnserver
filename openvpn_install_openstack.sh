@@ -75,17 +75,11 @@ cat << EOF > update.yml
            upgrade: yes
            update_cache: yes
            cache_valid_time: 86400
-EOF
-ansible-playbook update.yml
+#EOF
+#ansible-playbook update.yml
 
-# Reboot after update:
-for n in openvpn_server caserver; do  ssh -o StrictHostKeyChecking=no debian@${n} 'sudo reboot'; done
-
-# Check after reboot:
-for n in openvpn_server caserver; do  ssh -o StrictHostKeyChecking=no debian@${n} 'uname -n'; done
-
-# Install packages:
-cat << EOF > install.yml
+## Install packages:
+#cat << EOF > install.yml
 - 
    name: Install
    hosts: openvpn_server, caserver
@@ -126,14 +120,14 @@ cat << EOF > install.yml
         with_dict: '{{ sysctl_config }}'
       
       
-EOF
-ansible-playbook install.yml
+#EOF
+#ansible-playbook install.yml
 
 ####################################################################################################################################
 #     CA certificates:                                                                                                             #
 ####################################################################################################################################
 
-cat << EOF > configure_ca.yml
+#cat << EOF > configure_ca.yml
 -
    name: Configure CA
    hosts: caserver
@@ -241,13 +235,10 @@ cat << EOF > configure_ca.yml
            cat /root/ca/intermediate/certs/intermediate.crt /root/ca/certs/ca.crt > /root/ca/intermediate/certs/ca-chain.crt;
            chmod 444 /root/ca/intermediate/certs/ca-chain.crt;
 
-EOF
+#EOF
+#ansible-playbook configure_ca.yml
 
-ansible-playbook configure_ca.yml
-
-
-
-cat << EOF > configure_openvpn.yml
+#cat << EOF > configure_openvpn.yml
 -
    name: Configure Openvpn
    hosts: openvpn_server
@@ -367,249 +358,116 @@ cat << EOF > configure_openvpn.yml
                            
 EOF
 
-ansible-playbook configure_openvpn.yml
+#ansible-playbook configure_openvpn.yml
+ansible-playbook update.yml
 
 
+# Reboot after update:
+rm -f ~/.ssh/known_hosts
+for n in openvpn_server caserver; do  ssh -o StrictHostKeyChecking=no debian@${n} 'sudo reboot'; done
 
-#Get The Base Config
-#gunzip -c /usr/share/doc/openvpn/examples/sample-config-files/server.conf.gz > /etc/openvpn/server.conf
+# Check after reboot:
+for n in openvpn_server caserver; do  ssh -o StrictHostKeyChecking=no debian@${n} 'uname -n'; done
 
-#Edit file:
-#cat << EOF > /etc/openvpn/server.conf
-cat << EOF > server.conf
-proto tcp
-port 5000
-dev tun
-server 10.0.0.0 255.255.255.0
-route 10.0.0.0 255.255.255.0
-push "route 10.50.0.0 255.255.0.0"
-push "route 10.51.0.0 255.255.0.0"
-push "route 10.52.0.0 255.255.0.0"
-push "route 10.2.1.30 255.255.255.0"
-push "dhcp-option DNS 10.2.1.30"
-comp-lzo
-keepalive 10 120
-float
-max-clients 10
-persist-key
-persist-tun
-log-append /var/log/openvpn.log
-verb 6
-tls-server
-dh /etc/openvpn/certs/dh4096.pem
-ca /etc/openvpn/certs/ca.crt
-cert /etc/openvpn/certs/server.openvpn.crt
-key /etc/openvpn/certs/server.openvpn.key
-tls-auth /etc/openvpn/certs/ta.key
-status /var/log/openvpn.stats 
-script-security 3 
-tls-verify "/etc/openvpn/verify-cn /etc/openvpn/white_list"
-tls-cipher TLS-DHE-RSA-WITH-AES-256-GCM-SHA384:TLS-DHE-RSA-WITH-AES-128-GCM-SHA256:TLS-DHE-RSA-WITH-AES-256-CBC-SHA:TLS-DHE-RSA-WITH-CAMELLIA-256-CBC-SHA:TLS-DHE-RSA-WITH-AES-128-CBC-SHA:TLS-DHE-RSA-WITH-CAMELLIA-128-CBC-SHA
+# Create cert request:
+cat << EOF > request.yml
+-
+   name: Create and sign certificate
+   hosts: caserver
+   remote_user: debian
+   vars:
+      ansible_python_interpreter: /usr/bin/python3
+      cn: '#CN#'
+      subject: '/emailAddress={{cn}}@openvpn.net/CN={{cn}}/O=efb/OU=com/L=CBV/ST=MG/C=BR'   
+
+   tasks:
+      - name: Remove clone directory      
+        become: true
+        file:
+           path: /root/clients
+           state: absent
+
+   tasks:
+      - name: Create cert request and sign
+        become: true
+        shell:
+           mkdir /root/clients;           
+           openssl genrsa -out /root/clients/{{cn}}.key 4096;           
+           touch /root/.rnd;
+           openssl req -new -key /root/clients/{{cn}}.key -out /root/clients/{{cn}}.csr -subj {{subject}} -sha512;           
+           openssl ca -batch -config /root/ca/intermediate/openssl.cnf -days 3650 -notext -md sha512 -in /root/clients/{{cn}}.csr -passin pass:\$(cat /root/ca/intca_pass)  -out /root/clients/{{cn}}.crt;
+        
+      - name: Get file from openvpn
+        become: true
+        fetch:
+          src: /root/clients/{{cn}}.crt
+          dest: /tmp/ 
+          
+      - name: Get file from ca
+        become: true
+        fetch:
+          src: /root/clients/{{cn}}.key
+          dest: /tmp/   
+
+-
+   name: Create and sign certificate
+   hosts: openvpn_server
+   remote_user: debian
+   vars:
+      ansible_python_interpreter: /usr/bin/python3
+      cn: '#CN#'
+      subject: '/emailAddress={{cn}}@openvpn.net/CN={{cn}}/O=efb/OU=com/L=CBV/ST=MG/C=BR'   
+          
+   tasks:                
+      - name: Get file from openvpn
+        become: true
+        fetch:
+          src: /etc/openvpn/certs/ta.key
+          dest: /tmp/                      
+
+      - name: Get file from openvpn
+        become: true
+        fetch:
+          src: /etc/openvpn/certs/dh4096.pem
+          dest: /tmp/   
+
+      - name: Get file from openvpn
+        become: true
+        fetch:
+          src: /etc/openvpn/certs/ca-chain.crt
+          dest: /tmp/               
+          
+-
+   name: Add cn to the allowed
+   hosts: openvpn_server
+   remote_user: debian
+   vars:
+      ansible_python_interpreter: /usr/bin/python3
+      cn: '#CN#'
+      
+   tasks:   
+      - name: Remove clone directory      
+        become: true
+        shell:
+           echo {{cn}} >> /etc/openvpn/white_list;           
 EOF
 
-
-cat << EOF > server.conf
-proto tcp
-port 5000
-dev tun
-server 172.16.0.0 255.240.0.0
-route 172.16.0.0 255.240.0.0
-comp-lzo
-keepalive 10 120
-float
-max-clients 10
-persist-key
-persist-tun
-log-append /var/log/openvpn.log
-verb 6
-tls-server
-dh /etc/openvpn/certs/dh4096.pem
-ca /etc/openvpn/certs/ca.crt
-cert /etc/openvpn/certs/server.openvpn.crt
-key /etc/openvpn/certs/server.openvpn.key
-tls-auth /etc/openvpn/certs/ta.key
-status /var/log/openvpn.stats 
-script-security 3 
-tls-verify "/etc/openvpn/verify-cn /etc/openvpn/white_list"
-tls-cipher TLS-DHE-RSA-WITH-AES-256-GCM-SHA384:TLS-DHE-RSA-WITH-AES-128-GCM-SHA256:TLS-DHE-RSA-WITH-AES-256-CBC-SHA:TLS-DHE-RSA-WITH-CAMELLIA-256-CBC-SHA:TLS-DHE-RSA-WITH-AES-128-CBC-SHA:TLS-DHE-RSA-WITH-CAMELLIA-128-CBC-SHA
-EOF
-
-#Create the "verify script":
-
-cat << EOF > verify-cn
-#!/usr/bin/python
-
-import sys
-
-if len(sys.argv) < 4:
-   sys.exit("Usage: %s whitelist_file depth x509_subject" % sys.argv[0])
-
-whitelist_file = sys.argv[1]
-depth = int(sys.argv[2])
-x509 = str(sys.argv[3])
-
-if depth == -1:
-   sys.exit(0)
-	
-cn = x509.replace(",", " ").replace(" = ", "=").split("CN=")[1].split()[0]
-
-fp = open(whitelist_file, "r")
-
-for f in fp.readlines():
-   if f.strip() == cn.strip():		
-      sys.exit(0)
-
-fp.close()
-sys.exit(1)
-EOF
-
-chmod +x verify-cn
-
-#Create the whitelist file for whitelisted cns:
-touch /etc/openvpn/white_list
-
-#Populate whitelist file (client01 is an example, the first two lines must e present)
-cat << EOF >> /etc/openvpn/white_list
-ca.cloud.int
-intermediate.ca.cloud.int
-eduardo.openvpn
-wandelio.openvpn
-EOF
+cn="agw01.trial"
+sed -i "s/#CN#/${cn}/g" request.yml
+ansible-playbook request.yml
 
 
-cat << EOF >> /etc/openvpn/white_list
-ca.cloud.int
-intermediate.ca.cloud.int
-EOF
-#user openvpn
-#group nogroup
+# Copy files:
+rm -rf /tmp/magma
+mkdir /tmp/magma
 
-#Set Up An OpenVPN User
-#adduser --system --shell /usr/sbin/nologin --no-create-home openvpn
+cp /tmp/caserver/root/clients/${cn}.crt /tmp/magma/client.crt
+cp /tmp/caserver/root/clients/${cn}.key /tmp/magma/client.key
+cp /tmp/openvpn_server/etc/openvpn/certs/* /tmp/magma/
 
+openssl x509 -in /tmp/magma/client.crt -text -noout
+openssl x509 -in /tmp/magma/ca-chain.crt -text -noout
 
-#Start openvpn:
-systemctl enable openvpn
-systemctl restart openvpn
+ls -lhtr /tmp/magma/
 
 
-#Client:
-
-#Cert request:
-mkdir /root/clients
-cd /root/clients
-
-#Private key:
-openssl genrsa -out eduardo.openvpn.key 4096
-
-subj="/emailAddress=eduardoefb@gmail.com/CN=eduardo.openvpn/O=efb/OU=com/L=Cabo_Verde/ST=Minas_Gerais/C=BR"
-subj="/CN=eduardo.openvpn"
-openssl req -new -key eduardo.openvpn.key -out eduardo.openvpn.csr -subj $subj -sha512
-
-#Sign certificate:
-openssl ca -batch \
-   -config ~/ca/intermediate/openssl.cnf \
-   -days 365 \
-   -notext \
-   -md sha512 \
-   -in eduardo.openvpn.csr \
-   -passin pass:`cat ~/ca/intca_pass` \
-   -out eduardo.openvpn.crt
-
-
-openssl verify -CAfile  ~/ca/certs/ca.crt -untrusted /root/ca/intermediate/certs/intermediate.crt eduardo.openvpn.crt
-
-#Copy Diffie-Hellman:
-cp /etc/openvpn/certs/dh4096.pem .
-cp /etc/openvpn/certs/ta.key .
-cp /etc/openvpn/certs/ca.crt .
-
-#Trusted store:
-cat ~/ca/certs/ca.crt > ca.crt
-cat ~/ca/intermediate/certs/intermediate.crt >> ca.crt
-
-
-mkdir /tmp/wandelio
-cd /tmp/wandelio
-
-
-openssl genrsa -out wandelio.openvpn.key 4096
-
-subj="/CN=wandelio.openvpn"
-openssl req -new -key wandelio.openvpn.key -out wandelio.openvpn.csr -subj $subj -sha512
-
-#Sign certificate:
-openssl ca -batch \
-   -config ~/ca/intermediate/openssl.cnf \
-   -days 365 \
-   -notext \
-   -md sha512 \
-   -in wandelio.openvpn.csr \
-   -passin pass:`cat ~/ca/intca_pass` \
-   -out wandelio.openvpn.crt
-
-
-openssl verify -CAfile  ~/ca/certs/ca.crt -untrusted /root/ca/intermediate/certs/intermediate.crt wandelio.openvpn.crt
-
-#Copy Diffie-Hellman:
-cp /etc/openvpn/certs/dh4096.pem .
-cp /etc/openvpn/certs/ta.key .
-cp /etc/openvpn/certs/ca.crt .
-
-#Trusted store:
-cat ~/ca/certs/ca.crt > ca.crt
-cat ~/ca/intermediate/certs/intermediate.crt >> ca.crt
-
-
-
-#Configure client:
-cat << EOF > /etc/openvpn/client.conf
-client
-dev tun
-proto tcp
-remote 10.2.1.68
-port 5000
-
-#pull
-comp-lzo
-keepalive 10 120
-float
-tls-client
-persist-tun
-persist-key
-
-dh /etc/openvpn/certs/dh4096.pem
-ca /etc/openvpn/certs/ca.crt
-cert /etc/openvpn/certs/eduardo.openvpn.crt
-key /etc/openvpn/certs/eduardo.openvpn.key
-tls-auth /etc/openvpn/certs/ta.key
-route-method exe
-route-delay 2
-EOF
-
-
-#Linux mint:
-
-sudo apt-get install network-manager-openvpn-gnome network-manager-openvpn
-
-
-
-
-
-
-
-
-
-subj="/CN=felipe.openvpn"
-openssl genrsa -out felipe.openvpn.key 4096
-openssl req -new -key felipe.openvpn.key -out felipe.openvpn.csr -subj $subj -sha512
-
-#Sign certificate:
-openssl ca -batch \
-   -config ~/ca/intermediate/openssl.cnf \
-   -days 365 \
-   -notext \
-   -md sha512 \
-   -in felipe.openvpn.csr \
-   -passin pass:`cat ~/ca/intca_pass` \
-   -out felipe.openvpn.crt
