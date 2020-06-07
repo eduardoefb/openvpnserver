@@ -45,7 +45,7 @@ openstack keypair create --public-key ~/.ssh/id_rsa.pub openvpn_key
 
 net_id1=$(openstack network show extnet01 | grep "| id " | awk -F "|" '{print $3}' | sed 's/ //g') && echo $net_id1
 ip_net1=10.2.1.198
-image_name="ubuntu_1804"
+image_name="debian-9"
 openstack server delete openvpn_server
 openstack server create --flavor m1.large --image ${image_name} \
    --nic net-id=$net_id1,v4-fixed-ip=$ip_net1 \
@@ -60,14 +60,14 @@ openstack server create --flavor m1.large --image ${image_name} \
 openstack server list
 
 rm -f ~/.ssh/known_hosts
-for n in openvpn_server caserver; do  ssh -o StrictHostKeyChecking=no ubuntu@${n} 'uname -n'; done
+for n in openvpn_server caserver; do  ssh -o StrictHostKeyChecking=no debian@${n} 'uname -n'; done
 
 # Update:
 cat << EOF > update.yml
 - 
    name: Configure servers
    hosts: openvpn_server, caserver
-   remote_user: ubuntu
+   remote_user: debian
    tasks:                                                              
       - name: Update (update -y)
         become: true
@@ -79,17 +79,17 @@ EOF
 ansible-playbook update.yml
 
 # Reboot after update:
-for n in openvpn_server caserver; do  ssh -o StrictHostKeyChecking=no ubuntu@${n} 'sudo reboot'; done
+for n in openvpn_server caserver; do  ssh -o StrictHostKeyChecking=no debian@${n} 'sudo reboot'; done
 
 # Check after reboot:
-for n in openvpn_server caserver; do  ssh -o StrictHostKeyChecking=no ubuntu@${n} 'uname -n'; done
+for n in openvpn_server caserver; do  ssh -o StrictHostKeyChecking=no debian@${n} 'uname -n'; done
 
 # Install packages:
 cat << EOF > install.yml
 - 
    name: Install
    hosts: openvpn_server, caserver
-   remote_user: ubuntu
+   remote_user: debian
    vars:
       ansible_python_interpreter: /usr/bin/python3
       sysctl_config:
@@ -137,7 +137,7 @@ cat << EOF > configure_ca.yml
 -
    name: Configure CA
    hosts: caserver
-   remote_user: ubuntu
+   remote_user: debian
    vars:
       ansible_python_interpreter: /usr/bin/python3
       ca_subject: '/emailAddress=ca@ca.cloud.int/CN=ca.cloud.int/O=ca/OU=int/L=CBV/ST=MG/C=BR'
@@ -251,7 +251,7 @@ cat << EOF > configure_openvpn.yml
 -
    name: Configure Openvpn
    hosts: openvpn_server
-   remote_user: ubuntu
+   remote_user: debian
    vars:
       ansible_python_interpreter: /usr/bin/python3
       openvpn_subject: '/emailAddress=openvpn@ca.cloud.int/CN=server.openvpn/O=ca/OU=int/L=CBV/ST=MG/C=BR'
@@ -285,7 +285,7 @@ cat << EOF > configure_openvpn.yml
 -
    name: Sign certificate
    hosts: caserver
-   remote_user: ubuntu
+   remote_user: debian
    vars:
       ansible_python_interpreter: /usr/bin/python3
       openvpn_subject: '/emailAddress=openvpn@ca.cloud.int/CN=server.openvpn/O=ca/OU=int/L=CBV/ST=MG/C=BR'
@@ -321,7 +321,7 @@ cat << EOF > configure_openvpn.yml
 -
    name: Final configuration
    hosts: openvpn_server
-   remote_user: ubuntu
+   remote_user: debian
    vars:
       ansible_python_interpreter: /usr/bin/python3                     
    tasks:
