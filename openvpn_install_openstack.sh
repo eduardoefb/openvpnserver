@@ -1,8 +1,29 @@
 #!/bin/bash
 
+# Configure ansible:
+
+# Change this to ignore key check:
+sed -i 's/#host_key_checking = False/host_key_checking = False/g' /etc/ansible/ansible.cfg
+
+cat << EOF >> /etc/hosts
+10.2.1.198 openvpn_server
+10.2.1.199 caserver
+EOF
+
+cat << EOF >> /etc/ansible/hosts
+[openvpn]
+openvpn_server
+
+[ca]
+caserver
+
+EOF
+
+
 #Create the instance:
-#Create the instance:
-. nokia-openrc.sh
+. auth-rc
+source <(openstack complete)
+
 
 time openstack image create debian-9 \
   --file /home/nokia/images/debian-9.5.5-20181004-openstack-amd64.qcow2 \
@@ -19,235 +40,343 @@ openstack security group rule create --proto udp --dst-port 123 openvpn_server
 openstack security group rule create --proto tcp --dst-port 5000 openvpn_server
 openstack security group rule create --proto udp --dst-port 5000 openvpn_server
 
+openstack keypair delete openvpn_key
+openstack keypair create --public-key ~/.ssh/id_rsa.pub openvpn_key
+
 net_id1=$(openstack network show extnet01 | grep "| id " | awk -F "|" '{print $3}' | sed 's/ //g') && echo $net_id1
 ip_net1=10.2.1.198
-openstack server create --flavor m1.large --image debian-9 \
+image_name="ubuntu_1804"
+openstack server delete openvpn_server
+openstack server create --flavor m1.large --image ${image_name} \
    --nic net-id=$net_id1,v4-fixed-ip=$ip_net1 \
-   --security-group openvpn_server --key-name key01 openvpn_server
-
-
+   --security-group openvpn_server --key-name openvpn_key openvpn_server
+   
+ip_net1=10.2.1.199
+openstack server delete caserver
+openstack server create --flavor m1.large --image ${image_name} \
+   --nic net-id=$net_id1,v4-fixed-ip=$ip_net1 \
+   --security-group openvpn_server --key-name openvpn_key caserver   
 
 openstack server list
-#openstack server add floating ip openvpn_server 10.2.1.81
-#Connect into the server:
-ssh debian@10.2.1.81
-sudo su - 
 
-#Update system and install required libraries:
-apt update -y && apt upgrade -y && apt install -y openjdk-8-jdk wget procps zlib1g-dev libjpeg-dev libfreetype6-dev libgif-dev build-essential swftools openssl default-jre default-jdk ntp openvpn iptables-persistent
+rm -f ~/.ssh/known_hosts
+for n in openvpn_server caserver; do  ssh -o StrictHostKeyChecking=no ubuntu@${n} 'uname -n'; done
 
-
-
-#Prepare iptables:
-iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
-iptables -t nat -A POSTROUTING -o eth1 -j MASQUERADE
-dpkg-reconfigure iptables-persistent
-
-#IP forward and disable ipv6:
-cat << EOF >> /etc/sysctl.conf
-net.ipv4.ip_forward=1
-net.ipv6.conf.eth0.disable_ipv6 = 1
-net.ipv6.conf.eth1.disable_ipv6 = 1
+# Update:
+cat << EOF > update.yml
+- 
+   name: Configure servers
+   hosts: openvpn_server, caserver
+   remote_user: ubuntu
+   tasks:                                                              
+      - name: Update (update -y)
+        become: true
+        apt:
+           upgrade: yes
+           update_cache: yes
+           cache_valid_time: 86400
 EOF
+ansible-playbook update.yml
 
-net.ipv4.ip_forward=1
-net.ipv6.conf.eth0.disable_ipv6 = 1
-net.ipv6.conf.eth1.disable_ipv6 = 1
+# Reboot after update:
+for n in openvpn_server caserver; do  ssh -o StrictHostKeyChecking=no ubuntu@${n} 'sudo reboot'; done
 
+# Check after reboot:
+for n in openvpn_server caserver; do  ssh -o StrictHostKeyChecking=no ubuntu@${n} 'uname -n'; done
 
-#Configure routes:
-cd /etc/iproute2
+# Install packages:
+cat << EOF > install.yml
+- 
+   name: Install
+   hosts: openvpn_server, caserver
+   remote_user: ubuntu
+   vars:
+      ansible_python_interpreter: /usr/bin/python3
+      sysctl_config:
+         net.ipv4.ip_forward: 1
+         net.ipv4.conf.all.forwarding: 1
+         net.ipv6.conf.eth0.disable_ipv6: 1      
+   tasks:                                                              
+      - name: Disable IPV6
+        become: true
+        shell:           
+           echo "net.bridge.bridge-nf-call-ip6tables = 1 \nnet.bridge.bridge-nf-call-iptables = 1" > /etc/sysctl.d/k8s.conf &&  sysctl --system
+           
+      - name: Install packages
+        become: true
+        apt:        
+           pkg: ['openjdk-8-jdk', 'wget', 'procps', 'zlib1g-dev', 'libjpeg-dev', 'libfreetype6-dev', 'libgif-dev', 'build-essential', 'swftools', 'openssl', 'default-jre', 'default-jdk', 'ntp', 'openvpn', 'git']      
+     
+      - name: Configure rc.local
+        become: true
+        shell:
+           echo -e "#/bin/bash\n" > /etc/rc.local
+           echo -e "iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE" >> /etc/rc.local
+           chmod +x /etc/rc.local
+      
+      - name: Change sysctl
+        become: true
+        sysctl:
+           name: '{{ item.key }}'
+           value: '{{ item.value }}'
+           sysctl_set: yes
+           state: present
+           reload: yes
+           ignoreerrors: yes
+        with_dict: '{{ sysctl_config }}'
+      
+      
+EOF
+ansible-playbook install.yml
 
-#Add to rt_tables:
-10   outcenter
-11   velox
-
-
-#Add route tables:
-
-
-reboot
 ####################################################################################################################################
 #     CA certificates:                                                                                                             #
 ####################################################################################################################################
 
-rm -rf /tmp/*
-cd ~
-rm -rf /root/ca 2>/dev/null
-mkdir /root/ca
-cd /root/ca
-mkdir certs crl newcerts private
-chmod 400 private
-touch index.txt
-touch index.txt.attr
-#echo 9000 > serial
-awk -v min=00000000 -v max=99999990 'BEGIN{srand(); print int(min+rand()*(max-min+1))}' > serial
-
-#Edit the /root/ca/openssl.cnf  (use the sample file attached (openssl_ca.cnf)
-#Local:
-#wget --no-check-certificate https://efb.homelinux.org:9443/nextcloud/index.php/s/gsQsbEkS8qka1GI/download -O /root/ca/openssl.cnf
-
-#Remote:
-wget https://www.dropbox.com/s/eokrc3tjq5aynj9/openssl.cnf?dl=1 -O /root/ca/openssl.cnf
-
-
-sed -i 's/\.key\.pem/\.key/g' /root/ca/openssl.cnf
-sed -i 's/\.cert\.pem/\.crt/g' /root/ca/openssl.cnf
-
-#Define subject variable:
-export SUBJECT='/emailAddress=ca@ca.cloud.int/CN=<hostname>/O=ca/OU=int/L=Cabo_Verde/ST=Minas_Gerais/C=BR'
-
-#Create the root key 
-cd /root/ca
-
-#Define private key password:
-ca_pass=`openssl rand -hex 20`
-
-echo $ca_pass > ca_pass
-chmod 000 ca_pass
-
-#Generating root key:
-openssl genrsa -aes256 -out private/ca.key -passout pass:$ca_pass 4096
-chmod 400 private/ca.key
-
-#Create the root certificate
-CN="ca.cloud.int"
-sub=`echo $SUBJECT | sed "s/<hostname>/$CN/g"`
-   
-cd /root/ca
-openssl req -config openssl.cnf \
-      -key private/ca.key \
-      -passin pass:$ca_pass \
-      -new -x509 -days 7300 -sha512 -extensions v3_ca \
-      -subj $sub \
-      -out certs/ca.crt
-
-
-#Change its privilege
-chmod 400 certs/ca.crt
-
-#Verify the root certificate
-openssl x509 -noout -text -in certs/ca.crt
-
-
-
-####################################################################################################################################
-#  Create an intermediate CA:                                                                                                      #
-####################################################################################################################################
-
-mkdir /root/ca/intermediate
-
-cd /root/ca/intermediate
-mkdir certs crl csr newcerts private
-chmod 400 private
-touch index.txt
-touch index.txt.attr
-ser=`awk -v min=10000000 -v max=99999990 'BEGIN{srand(); print int(min+rand()*(max-min+1))}'`
-echo $ser > serial
-echo $ser > /root/ca/intermediate/crlnumber
-echo $ser > /root/ca/intermediate/certs/intermediate.srl
-
-#Edit the /root/ca/intermediate/openssl.cnf  (use the sample file attached (openssl_ca_intermediate.cnf)
-#Local:
-#wget --no-check-certificate https://efb.homelinux.org:9443/nextcloud/index.php/s/CXAmB8RlBS8xUho/download -O /root/ca/intermediate/openssl.cnf
-
-#Remote:
-wget https://www.dropbox.com/s/16zv9hxsnd1twe5/openssl_intermediate.cnf?dl=1 -O /root/ca/intermediate/openssl.cnf
-
-sed -i 's/\.key\.pem/\.key/g' /root/ca/intermediate/openssl.cnf
-sed -i 's/\.cert\.pem/\.crt/g' /root/ca/intermediate/openssl.cnf
-
-#To allow alternate name:
-#sed -i '/extendedKeyUsage = serverAuth/a subjectAltName = @alt_names\n\n[ alt_names ]\nDNS.1 = localhost\n\n' /root/ca/intermediate/openssl.cnf
-
-
-#Create the intermediate key
-CN="intermediate.ca.cloud.int"
-sub=`echo $SUBJECT | sed "s/<hostname>/$CN/g"`
-
-cd /root/ca
-intca_pass=`openssl rand -hex 20`
-echo $intca_pass > intca_pass
-openssl genrsa -aes256 -out intermediate/private/intermediate.key -passout pass:$intca_pass 4096
-chmod 400 intermediate/private/intermediate.key
-
-#Create the intermediate certificate
-cd /root/ca
-openssl req -config intermediate/openssl.cnf -new -sha512 \
-     -key intermediate/private/intermediate.key \
-     -passin pass:$intca_pass \
-     -subj $sub \
-     -out intermediate/csr/intermediate.csr
-
-#Check it:
-openssl req -in intermediate/csr/intermediate.csr -text -noout
-
-#To create an intermediate certificate, use the root CA with the v3_intermediate_ca extension to sign the intermediate CSR. 
-#The intermediate certificate should be valid for a shorter period than the root certificate. Ten years would be reasonable.
-
-cd /root/ca
-openssl ca -batch -config openssl.cnf -extensions v3_intermediate_ca \
-      -days 3650 -notext -md sha512 \
-      -in intermediate/csr/intermediate.csr \
-      -passin pass:$ca_pass \
-      -out intermediate/certs/intermediate.crt
-
-chmod 400 intermediate/certs/intermediate.crt
-
-#Verify the intermediate certificate 
-openssl x509 -noout -text -in intermediate/certs/intermediate.crt
+cat << EOF > configure_ca.yml
+-
+   name: Configure CA
+   hosts: caserver
+   remote_user: ubuntu
+   vars:
+      ansible_python_interpreter: /usr/bin/python3
+      ca_subject: '/emailAddress=ca@ca.cloud.int/CN=ca.cloud.int/O=ca/OU=int/L=CBV/ST=MG/C=BR'
+      int_ca_subject: '/emailAddress=ca@ca.cloud.int/CN=intermediate.ca.cloud.int/O=ca/OU=int/L=CBV/ST=MG/C=BR'
+               
+   tasks:
+      - name: Configure CA
+        become: true
+        shell:            
+           rm -rf /root/ca 2>/dev/null;                   
+           mkdir /root/ca;
+           cd /root/ca;
+           mkdir certs crl newcerts private;
+           chmod 400 private;
+           touch index.txt;
+           touch index.txt.attr;
+           awk -v min=00000000 -v max=99999990 'BEGIN{srand(); print int(min+rand()*(max-min+1))}' > serial;
       
-#Verify the intermediate certificate against the root certificate. An OK indicates that the chain of trust is intact.
-openssl verify -CAfile certs/ca.crt intermediate/certs/intermediate.crt
+      - name: Remove clone directory      
+        become: true
+        file:
+           path: /root/openvpnfiles
+           state: absent
+      
+      - name: Clone config files
+        become: true
+        git:
+           repo: "https://github.com/eduardoefb/openvpnserver.git"
+           dest: /root/openvpnfiles
+           clone: yes
+      
+      - name: Configure ca openssl.conf, create key
+        become: true
+        shell:           
+           sed 's/\.key\.pem/\.key/g' /root/openvpnfiles/ca_config_sample/openssl.cnf > /root/ca/openssl.cnf;
+           sed -i 's/\.cert\.pem/\.crt/g' /root/ca/openssl.cnf;
+           openssl rand -hex 20 > /root/ca/ca_pass;
+           chmod 000 /root/ca/ca_pass;
+           openssl genrsa -aes256 -out /root/ca/private/ca.key -passout pass:\$(cat /root/ca/ca_pass) 4096;
+           chmod 400 /root/ca/private/ca.key;
+           openssl req -config /root/ca/openssl.cnf -key /root/ca/private/ca.key -passin pass:\$(cat /root/ca/ca_pass) -new -x509 -days 3650 -sha512 -extensions v3_ca -subj {{ca_subject}} -out /root/ca/certs/ca.crt;           
 
-#Create the certificate chain file (optional)
-cat intermediate/certs/intermediate.crt certs/ca.crt > intermediate/certs/ca-chain.crt
-chmod 444 intermediate/certs/ca-chain.crt
+      - name: Create Directories
+        become: true
+        file:
+           path: /root/ca/intermediate
+           state: directory
+           mode: 700
+
+      - name: Create Directories
+        become: true           
+        file:
+           path: /root/ca/intermediate/certs
+           state: directory
+           mode: 700         
+
+      - name: Create Directories
+        become: true
+        file:
+           path: /root/ca/intermediate/crl
+           state: directory
+           mode: 700         
+
+      - name: Create Directories
+        become: true
+        file:
+           path: /root/ca/intermediate/csr
+           state: directory
+           mode: 700         
+
+      - name: Create Directories
+        become: true
+        file:
+           path: /root/ca/intermediate/newcerts
+           state: directory
+           mode: 700
+                    
+      - name: Create Directories
+        become: true                    
+        file:
+           path: /root/ca/intermediate/private
+           state: directory
+           mode: 700    
+           
+      - name: Configure intermediate CA
+        become: true
+        shell:
+           touch /root/ca/intermediate/index.txt;
+           touch /root/ca/intermediate/index.txt.attr;
+           awk -v min=10000000 -v max=99999990 'BEGIN{srand(); print int(min+rand()*(max-min+1))}' > /root/ca/intermediate/crlnumber;
+           cat /root/ca/intermediate/crlnumber > /root/ca/intermediate/serial;
+           cat /root/ca/intermediate/crlnumber > /root/ca/intermediate/certs/intermediate.srl;
+           sed 's/\.key\.pem/\.key/g' /root/openvpnfiles/ca_config_sample/openssl_intermediate.cnf > /root/ca/intermediate/openssl.cnf;
+           sed -i 's/\.cert\.pem/\.crt/g' /root/ca/intermediate/openssl.cnf;
+           intca_pass=\$(openssl rand -hex 20);      
+           echo \$intca_pass > /root/ca/intca_pass;
+           openssl genrsa -aes256 -out /root/ca/intermediate/private/intermediate.key -passout pass:\$intca_pass 4096;
+           chmod 400 /root/ca/intermediate/private/intermediate.key;
+           openssl req -config /root/ca/intermediate/openssl.cnf -new -sha512 -key /root/ca/intermediate/private/intermediate.key -passin pass:\$intca_pass -subj {{int_ca_subject}} -out /root/ca/intermediate/csr/intermediate.csr;
+           openssl ca -batch -config /root/ca/openssl.cnf -extensions v3_intermediate_ca -days 3650 -notext -md sha512 -in /root/ca/intermediate/csr/intermediate.csr -passin pass:\$(cat /root/ca/ca_pass) -out /root/ca/intermediate/certs/intermediate.crt;
+           cat /root/ca/intermediate/certs/intermediate.crt /root/ca/certs/ca.crt > /root/ca/intermediate/certs/ca-chain.crt;
+           chmod 444 /root/ca/intermediate/certs/ca-chain.crt;
+
+EOF
+
+ansible-playbook configure_ca.yml
 
 
 
-#Openvpn install:
-#Create a server key:
-mkdir -pv /etc/openvpn/certs
-cd /etc/openvpn/certs
+cat << EOF > configure_openvpn.yml
+-
+   name: Configure Openvpn
+   hosts: openvpn_server
+   remote_user: ubuntu
+   vars:
+      ansible_python_interpreter: /usr/bin/python3
+      openvpn_subject: '/emailAddress=openvpn@ca.cloud.int/CN=server.openvpn/O=ca/OU=int/L=CBV/ST=MG/C=BR'
+               
+   tasks:
+      - name: Remove directory      
+        become: true
+        file:
+           path: /etc/openvpn/certs
+           state: absent
+              
+      - name: Create Directories
+        become: true
+        file:
+           path: /etc/openvpn/certs
+           state: directory
+           mode: 700 
+      
+      - name: Create private key
+        become: true
+        shell:
+           openssl genrsa -out /etc/openvpn/certs/server.openvpn.key 4096;
+           openssl req -new -key /etc/openvpn/certs/server.openvpn.key -out /tmp/server.openvpn.csr -subj {{ openvpn_subject }} -sha512;
+           
+      - name: Get file from openvpn
+        become: true
+        fetch:
+          src: /tmp/server.openvpn.csr
+          dest: /tmp/  
+      
+-
+   name: Sign certificate
+   hosts: caserver
+   remote_user: ubuntu
+   vars:
+      ansible_python_interpreter: /usr/bin/python3
+      openvpn_subject: '/emailAddress=openvpn@ca.cloud.int/CN=server.openvpn/O=ca/OU=int/L=CBV/ST=MG/C=BR'
+               
+   tasks:
+      - name: Transfer csr to server     
+        become: true
+        copy:
+           src: /tmp/openvpn_server/tmp/server.openvpn.csr
+           dest: /tmp/server.openvpn.csr
+           owner: root
+           group: root
+           mode: '0644'
+      
+      - name: Sign the certificate
+        become: true
+        shell:
+           openssl ca -batch -config /root/ca/intermediate/openssl.cnf -extensions server_cert -days 3650 -notext -md sha512 -in /tmp/server.openvpn.csr -passin pass:\$(cat /root/ca/intca_pass) -out /tmp/server.openvpn.crt        
 
-#Create a certificate request for server:
 
-#Private key:
-openssl genrsa -out server.openvpn.key 4096
+      - name: Get file from openvpn
+        become: true
+        fetch:
+          src: /tmp/server.openvpn.crt
+          dest: /tmp/ 
+          
+      - name: Get ca-chain from ca
+        become: true  
+        fetch:
+           src: /root/ca/intermediate/certs/ca-chain.crt
+           dest: /tmp/          
 
-#Cert request:
-subj="/emailAddress=eduardoefb@gmail.com/CN=server.openvpn/O=efb/OU=com/L=Cabo_Verde/ST=Minas_Gerais/C=BR"
-subj="/CN=server.openvpn"
-openssl req -new -key server.openvpn.key -out server.openvpn.csr -subj $subj -sha512
+-
+   name: Final configuration
+   hosts: openvpn_server
+   remote_user: ubuntu
+   vars:
+      ansible_python_interpreter: /usr/bin/python3                     
+   tasks:
+      - name: Transfer crt to openvpn     
+        become: true
+        copy:
+           src: /tmp/caserver/tmp/server.openvpn.crt
+           dest: /etc/openvpn/certs/server.openvpn.crt
+           owner: root
+           group: root
+           mode: '0644'
 
-#Sign certificate:
-openssl ca -batch \
-   -config ~/ca/intermediate/openssl.cnf \
-   -extensions server_cert \
-   -days 3650 \
-   -notext \
-   -md sha512 \
-   -in server.openvpn.csr \
-   -passin pass:`cat ~/ca/intca_pass` \
-   -out server.openvpn.crt
+      - name: Transfer crt to openvpn     
+        become: true
+        copy:
+           src: /tmp/caserver/root/ca/intermediate/certs/ca-chain.crt
+           dest: /etc/openvpn/certs/ca-chain.crt
+           owner: root
+           group: root
+           mode: '0644'           
+           
+      - name: Generate a Diffie-Hellman PEM
+        become: true
+        shell:           
+           openssl dhparam -dsaparam -out /etc/openvpn/certs/dh4096.pem 4096           
+
+      - name: Generate An HMAC Key
+        become: true
+        shell:
+           openvpn --genkey --secret /etc/openvpn/certs/ta.key
+           
+      - name: Clone config files
+        become: true
+        git:
+           repo: "https://github.com/eduardoefb/openvpnserver.git"
+           dest: /root/openvpnfiles
+           clone: yes  
+           
+      - name: Copy config files
+        become: true
+        shell:
+           cp /root/openvpnfiles/openvpn_conf_sample/* /etc/openvpn/                    
+                           
+EOF
+
+ansible-playbook configure_openvpn.yml
 
 
-#Generate a Diffie-Hellman PEM
-openssl dhparam 4096 > dh4096.pem
-
-#Generate An HMAC Key
-openvpn --genkey --secret ta.key
-
-#Trusted store:
-cat ~/ca/certs/ca.crt > ca.crt
-cat ~/ca/intermediate/certs/intermediate.crt >> ca.crt
 
 #Get The Base Config
 #gunzip -c /usr/share/doc/openvpn/examples/sample-config-files/server.conf.gz > /etc/openvpn/server.conf
 
 #Edit file:
-cat << EOF > /etc/openvpn/server.conf
+#cat << EOF > /etc/openvpn/server.conf
+cat << EOF > server.conf
 proto tcp
 port 5000
 dev tun
@@ -279,9 +408,35 @@ tls-cipher TLS-DHE-RSA-WITH-AES-256-GCM-SHA384:TLS-DHE-RSA-WITH-AES-128-GCM-SHA2
 EOF
 
 
+cat << EOF > server.conf
+proto tcp
+port 5000
+dev tun
+server 172.16.0.0 255.240.0.0
+route 172.16.0.0 255.240.0.0
+comp-lzo
+keepalive 10 120
+float
+max-clients 10
+persist-key
+persist-tun
+log-append /var/log/openvpn.log
+verb 6
+tls-server
+dh /etc/openvpn/certs/dh4096.pem
+ca /etc/openvpn/certs/ca.crt
+cert /etc/openvpn/certs/server.openvpn.crt
+key /etc/openvpn/certs/server.openvpn.key
+tls-auth /etc/openvpn/certs/ta.key
+status /var/log/openvpn.stats 
+script-security 3 
+tls-verify "/etc/openvpn/verify-cn /etc/openvpn/white_list"
+tls-cipher TLS-DHE-RSA-WITH-AES-256-GCM-SHA384:TLS-DHE-RSA-WITH-AES-128-GCM-SHA256:TLS-DHE-RSA-WITH-AES-256-CBC-SHA:TLS-DHE-RSA-WITH-CAMELLIA-256-CBC-SHA:TLS-DHE-RSA-WITH-AES-128-CBC-SHA:TLS-DHE-RSA-WITH-CAMELLIA-128-CBC-SHA
+EOF
 
 #Create the "verify script":
-cat << EOF > /etc/openvpn/verify-cn
+
+cat << EOF > verify-cn
 #!/usr/bin/python
 
 import sys
@@ -308,7 +463,7 @@ fp.close()
 sys.exit(1)
 EOF
 
-chmod +x /etc/openvpn/verify-cn
+chmod +x verify-cn
 
 #Create the whitelist file for whitelisted cns:
 touch /etc/openvpn/white_list
@@ -322,6 +477,10 @@ wandelio.openvpn
 EOF
 
 
+cat << EOF >> /etc/openvpn/white_list
+ca.cloud.int
+intermediate.ca.cloud.int
+EOF
 #user openvpn
 #group nogroup
 
