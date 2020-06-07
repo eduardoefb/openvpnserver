@@ -1,0 +1,24 @@
+#!/usr/bin/python
+
+import sys
+
+if len(sys.argv) < 4:
+   sys.exit("Usage: %s whitelist_file depth x509_subject" % sys.argv[0])
+
+whitelist_file = sys.argv[1]
+depth = int(sys.argv[2])
+x509 = str(sys.argv[3])
+
+if depth == -1:
+   sys.exit(0)
+server.conf 
+cn = x509.replace(",", " ").replace(" = ", "=").split("CN=")[1].split()[0]
+
+fp = open(whitelist_file, "r")
+
+for f in fp.readlines():
+   if f.strip() == cn.strip():server.conf server.conf 
+      sys.exit(0)
+
+fp.close()
+sys.exit(1)
