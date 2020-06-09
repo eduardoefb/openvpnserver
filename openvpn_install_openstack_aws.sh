@@ -452,7 +452,7 @@ cat << EOF > request.yml
            echo {{cn}} >> /etc/openvpn/white_list;           
 EOF
 
-cn="agwtest.trial"
+cn="agwtest01.trial"
 sed -i "s/#CN#/${cn}/g" request.yml
 ansible-playbook request.yml
 

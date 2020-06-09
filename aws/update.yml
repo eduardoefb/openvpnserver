@@ -1,0 +1,11 @@
+- 
+   name: Configure servers
+   hosts: openvpn, ca
+   remote_user: ubuntu
+   tasks:                                                              
+      - name: Update (update -y)
+        become: true
+        apt:
+           upgrade: yes
+           update_cache: yes
+           cache_valid_time: 86400

@@ -1,0 +1,126 @@
+-
+   name: Configure Openvpn
+   hosts: openvpn
+   remote_user: ubuntu
+   vars:
+      ansible_python_interpreter: /usr/bin/python3
+      domain: 'coretelinfo.net'
+      cn: 'openvpn.{{domain}}'       
+      mail: 'openvpn@{{domain}}'
+      openvpn_subject: '/emailAddress={{mail}}/CN=openvpn.{{cn}}/O=ca/OU=int/L=SJK/ST=SP/C=BR'
+               
+   tasks:
+      - name: Remove directory      
+        become: true
+        file:
+           path: /etc/openvpn/certs
+           state: absent
+              
+      - name: Create Directories
+        become: true
+        file:
+           path: /etc/openvpn/certs
+           state: directory
+           mode: 700 
+      
+      - name: Create private key
+        become: true
+        shell:
+           openssl genrsa -out /etc/openvpn/certs/server.openvpn.key 4096;
+           openssl req -new -key /etc/openvpn/certs/server.openvpn.key -out /tmp/server.openvpn.csr -subj {{ openvpn_subject }} -sha512;
+           
+      - name: Get file from openvpn
+        become: true
+        fetch:
+          src: /tmp/server.openvpn.csr
+          dest: /tmp/  
+      
+-
+   name: Sign certificate
+   hosts: ca
+   remote_user: ubuntu
+   vars:
+      ansible_python_interpreter: /usr/bin/python3
+      domain: 'coretelinfo.net'
+      cn: 'openvpn.{{domain}}' 
+      mail: 'openvpn@{{domain}}'
+      openvpn_subject: '/emailAddress={{mail}}/CN={{cn}}/O=ca/OU=int/L=SJK/ST=SP/C=BR'
+                                 
+   tasks:
+      - name: Transfer csr to server     
+        become: true
+        copy:
+           src: /tmp/openvpn/tmp/server.openvpn.csr
+           dest: /tmp/server.openvpn.csr
+           owner: root
+           group: root
+           mode: '0644'
+      
+      - name: Sign the certificate
+        become: true
+        shell:
+           openssl ca -batch -config /root/ca/intermediate/openssl.cnf -extensions server_cert -days 3650 -notext -md sha512 -in /tmp/server.openvpn.csr -passin pass:$(cat /root/ca/intca_pass) -out /tmp/server.openvpn.crt        
+
+
+      - name: Get file from openvpn
+        become: true
+        fetch:
+          src: /tmp/server.openvpn.crt
+          dest: /tmp/ 
+          
+      - name: Get ca-chain from ca
+        become: true  
+        fetch:
+           src: /root/ca/intermediate/certs/ca-chain.crt
+           dest: /tmp/          
+
+-
+   name: Final configuration
+   hosts: openvpn
+   remote_user: ubuntu
+   vars:
+      ansible_python_interpreter: /usr/bin/python3  
+      domain: 'coretelinfo.net'
+      caserver: 'ca.{{domain}}'
+      vpnserver: 'openvpn.{{domain}}'             
+   tasks:
+      - name: Transfer crt to openvpn     
+        become: true
+        copy:
+           src: /tmp/ca/tmp/server.openvpn.crt
+           dest: /etc/openvpn/certs/server.openvpn.crt
+           owner: root
+           group: root
+           mode: '0644'
+
+      - name: Transfer crt to openvpn     
+        become: true
+        copy:
+           src: /tmp/ca/root/ca/intermediate/certs/ca-chain.crt
+           dest: /etc/openvpn/certs/ca-chain.crt
+           owner: root
+           group: root
+           mode: '0644'           
+           
+      - name: Generate a Diffie-Hellman PEM
+        become: true
+        shell:           
+           openssl dhparam -dsaparam -out /etc/openvpn/certs/dh4096.pem 4096           
+
+      - name: Generate An HMAC Key
+        become: true
+        shell:
+           openvpn --genkey --secret /etc/openvpn/certs/ta.key
+           
+      - name: Clone config files
+        become: true
+        git:
+           repo: "https://github.com/eduardoefb/openvpnserver.git"
+           dest: /root/openvpnfiles
+           clone: yes  
+           
+      - name: Copy config files
+        become: true
+        shell:
+           cp /root/openvpnfiles/openvpn_conf_sample/* /etc/openvpn/                    
+                           

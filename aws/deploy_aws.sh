@@ -1,63 +1,9 @@
 #!/bin/bash
 
 # Configure ansible:
-
-# Change this to ignore key check:
-sed -i 's/#host_key_checking = False/host_key_checking = False/g' /etc/ansible/ansible.cfg
-
-cat << EOF >> /etc/hosts
-10.2.1.198 openvpn_server
-10.2.1.199 caserver
-EOF
-
-cat << EOF >> /etc/ansible/hosts
-[openvpn]
-openvpn_server
-
-[ca]
-caserver
-
-EOF
-
-
-#Create the instance:
-. auth-rc
-source <(openstack complete)
-
-
-time openstack image create ubuntu-9 \
-  --file /home/nokia/images/ubuntu-9.5.5-20181004-openstack-amd64.qcow2 \
-  --disk-format qcow2 --container-format bare \
-  --public
-
-
-openstack security group delete openvpn_server
-openstack security group create openvpn_server
-openstack security group rule create --proto icmp openvpn_server
-openstack security group rule create --proto tcp --dst-port 22 openvpn_server
-openstack security group rule create --proto tcp --dst-port 123 openvpn_server
-openstack security group rule create --proto udp --dst-port 123 openvpn_server
-openstack security group rule create --proto tcp --dst-port 5000 openvpn_server
-openstack security group rule create --proto udp --dst-port 5000 openvpn_server
-
-openstack keypair delete openvpn_key
-openstack keypair create --public-key ~/.ssh/id_rsa.pub openvpn_key
-
-net_id1=$(openstack network show extnet01 | grep "| id " | awk -F "|" '{print $3}' | sed 's/ //g') && echo $net_id1
-ip_net1=10.2.1.198
-image_name="ubuntu_1804"
-openstack server delete openvpn_server
-openstack server create --flavor m1.large --image ${image_name} \
-   --nic net-id=$net_id1,v4-fixed-ip=$ip_net1 \
-   --security-group openvpn_server --key-name openvpn_key openvpn_server
-   
-ip_net1=10.2.1.199
-openstack server delete caserver
-openstack server create --flavor m1.large --image ${image_name} \
-   --nic net-id=$net_id1,v4-fixed-ip=$ip_net1 \
-   --security-group openvpn_server --key-name openvpn_key caserver   
-
-openstack server list
+ssh-keygen -t rsa -f id_rsa
+terraform init
+terraform apply
 
 rm -f ~/.ssh/known_hosts
 for n in openvpn_server caserver; do  ssh -o StrictHostKeyChecking=no ubuntu@${n} 'uname -n'; done
@@ -66,7 +12,7 @@ for n in openvpn_server caserver; do  ssh -o StrictHostKeyChecking=no ubuntu@${n
 cat << EOF > update.yml
 - 
    name: Configure servers
-   hosts: openvpn_server, caserver
+   hosts: openvpn, ca
    remote_user: ubuntu
    tasks:                                                              
       - name: Update (update -y)
@@ -75,14 +21,22 @@ cat << EOF > update.yml
            upgrade: yes
            update_cache: yes
            cache_valid_time: 86400
-#EOF
-#ansible-playbook update.yml
+EOF
+ansible-playbook update.yml --private-key id_rsa
+
+# Reboot:
+ssh -i id_rsa ubuntu@openvpn.coretelinfo.net 'sudo reboot'
+ssh -i id_rsa ubuntu@ca.coretelinfo.net 'sudo reboot'
+
+# Check
+ssh -i id_rsa ubuntu@openvpn.coretelinfo.net 'uname -n'
+ssh -i id_rsa ubuntu@ca.coretelinfo.net 'uname -n'
 
 ## Install packages:
-#cat << EOF > install.yml
+cat << EOF > install.yml
 - 
    name: Install
-   hosts: openvpn_server, caserver
+   hosts: openvpn, ca
    remote_user: ubuntu
    vars:
       ansible_python_interpreter: /usr/bin/python3
@@ -120,22 +74,24 @@ cat << EOF > update.yml
         with_dict: '{{ sysctl_config }}'
       
       
-#EOF
-#ansible-playbook install.yml
+EOF
+ansible-playbook install.yml --private-key=id_rsa
 
 ####################################################################################################################################
 #     CA certificates:                                                                                                             #
 ####################################################################################################################################
 
-#cat << EOF > configure_ca.yml
+cat << EOF > configure_ca.yml
 -
    name: Configure CA
-   hosts: caserver
+   hosts: ca
    remote_user: ubuntu
-   vars:
+   vars:   
       ansible_python_interpreter: /usr/bin/python3
-      ca_subject: '/emailAddress=ca@ca.cloud.int/CN=ca.cloud.int/O=ca/OU=int/L=CBV/ST=MG/C=BR'
-      int_ca_subject: '/emailAddress=ca@ca.cloud.int/CN=intermediate.ca.cloud.int/O=ca/OU=int/L=CBV/ST=MG/C=BR'
+      
+      domain: 'coretelinfo.net'            
+      ca_subject: '/emailAddress=ca@{{domain}}/CN=ca.{{domain}}/O=ca/OU=int/L=SJK/ST=SP/C=BR'
+      int_ca_subject: '/emailAddress=ca@ca.{{domain}}/CN=intermediate.ca.{{domain}}/O=ca/OU=int/L=SJK/ST=SP/C=BR'
                
    tasks:
       - name: Configure CA
@@ -235,17 +191,20 @@ cat << EOF > update.yml
            cat /root/ca/intermediate/certs/intermediate.crt /root/ca/certs/ca.crt > /root/ca/intermediate/certs/ca-chain.crt;
            chmod 444 /root/ca/intermediate/certs/ca-chain.crt;
 
-#EOF
-#ansible-playbook configure_ca.yml
+EOF
+ansible-playbook configure_ca.yml --private-key=id_rsa
 
-#cat << EOF > configure_openvpn.yml
+cat << EOF > configure_openvpn.yml
 -
    name: Configure Openvpn
-   hosts: openvpn_server
+   hosts: openvpn
    remote_user: ubuntu
    vars:
       ansible_python_interpreter: /usr/bin/python3
-      openvpn_subject: '/emailAddress=openvpn@ca.cloud.int/CN=server.openvpn/O=ca/OU=int/L=CBV/ST=MG/C=BR'
+      domain: 'coretelinfo.net'
+      cn: 'openvpn.{{domain}}'       
+      mail: 'openvpn@{{domain}}'
+      openvpn_subject: '/emailAddress={{mail}}/CN=openvpn.{{cn}}/O=ca/OU=int/L=SJK/ST=SP/C=BR'
                
    tasks:
       - name: Remove directory      
@@ -275,17 +234,20 @@ cat << EOF > update.yml
       
 -
    name: Sign certificate
-   hosts: caserver
+   hosts: ca
    remote_user: ubuntu
    vars:
       ansible_python_interpreter: /usr/bin/python3
-      openvpn_subject: '/emailAddress=openvpn@ca.cloud.int/CN=server.openvpn/O=ca/OU=int/L=CBV/ST=MG/C=BR'
-               
+      domain: 'coretelinfo.net'
+      cn: 'openvpn.{{domain}}' 
+      mail: 'openvpn@{{domain}}'
+      openvpn_subject: '/emailAddress={{mail}}/CN={{cn}}/O=ca/OU=int/L=SJK/ST=SP/C=BR'
+                                 
    tasks:
       - name: Transfer csr to server     
         become: true
         copy:
-           src: /tmp/openvpn_server/tmp/server.openvpn.csr
+           src: /tmp/openvpn/tmp/server.openvpn.csr
            dest: /tmp/server.openvpn.csr
            owner: root
            group: root
@@ -311,15 +273,18 @@ cat << EOF > update.yml
 
 -
    name: Final configuration
-   hosts: openvpn_server
+   hosts: openvpn
    remote_user: ubuntu
    vars:
-      ansible_python_interpreter: /usr/bin/python3                     
+      ansible_python_interpreter: /usr/bin/python3  
+      domain: 'coretelinfo.net'
+      caserver: 'ca.{{domain}}'
+      vpnserver: 'openvpn.{{domain}}'             
    tasks:
       - name: Transfer crt to openvpn     
         become: true
         copy:
-           src: /tmp/caserver/tmp/server.openvpn.crt
+           src: /tmp/ca/tmp/server.openvpn.crt
            dest: /etc/openvpn/certs/server.openvpn.crt
            owner: root
            group: root
@@ -328,7 +293,7 @@ cat << EOF > update.yml
       - name: Transfer crt to openvpn     
         become: true
         copy:
-           src: /tmp/caserver/root/ca/intermediate/certs/ca-chain.crt
+           src: /tmp/ca/root/ca/intermediate/certs/ca-chain.crt
            dest: /etc/openvpn/certs/ca-chain.crt
            owner: root
            group: root
@@ -359,21 +324,21 @@ cat << EOF > update.yml
 EOF
 
 #ansible-playbook configure_openvpn.yml
-ansible-playbook update.yml
+ansible-playbook configure_openvpn.yml --private-key=id_rsa
 
 
 # Reboot after update:
 rm -f ~/.ssh/known_hosts
-for n in openvpn_server caserver; do  ssh -o StrictHostKeyChecking=no ubuntu@${n} 'sudo reboot'; done
+for n in openvpn ca; do  ssh -i id_rsa -o StrictHostKeyChecking=no ubuntu@${n} 'sudo reboot'; done
 
 # Check after reboot:
-for n in openvpn_server caserver; do  ssh -o StrictHostKeyChecking=no ubuntu@${n} 'uname -n'; done
+for n in openvpn ca; do  ssh -i id_rsa -o StrictHostKeyChecking=no ubuntu@${n} 'uname -n'; done
 
 # Create cert request:
 cat << EOF > request.yml
 -
    name: Create and sign certificate
-   hosts: caserver
+   hosts: ca
    remote_user: ubuntu
    vars:
       ansible_python_interpreter: /usr/bin/python3
@@ -411,7 +376,7 @@ cat << EOF > request.yml
 
 -
    name: Create and sign certificate
-   hosts: openvpn_server
+   hosts: openvpn
    remote_user: ubuntu
    vars:
       ansible_python_interpreter: /usr/bin/python3
@@ -439,7 +404,7 @@ cat << EOF > request.yml
           
 -
    name: Add cn to the allowed
-   hosts: openvpn_server
+   hosts: openvpn
    remote_user: ubuntu
    vars:
       ansible_python_interpreter: /usr/bin/python3
@@ -452,7 +417,7 @@ cat << EOF > request.yml
            echo {{cn}} >> /etc/openvpn/white_list;           
 EOF
 
-cn="agwtest.trial"
+cn="agwtest01.trial"
 sed -i "s/#CN#/${cn}/g" request.yml
 ansible-playbook request.yml
 

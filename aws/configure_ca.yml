@@ -1,0 +1,109 @@
+-
+   name: Configure CA
+   hosts: ca
+   remote_user: ubuntu
+   vars:   
+      ansible_python_interpreter: /usr/bin/python3
+      
+      domain: 'coretelinfo.net'            
+      ca_subject: '/emailAddress=ca@{{domain}}/CN=ca.{{domain}}/O=ca/OU=int/L=SJK/ST=SP/C=BR'
+      int_ca_subject: '/emailAddress=ca@ca.{{domain}}/CN=intermediate.ca.{{domain}}/O=ca/OU=int/L=SJK/ST=SP/C=BR'
+               
+   tasks:
+      - name: Configure CA
+        become: true
+        shell:            
+           rm -rf /root/ca 2>/dev/null;                   
+           mkdir /root/ca;
+           cd /root/ca;
+           mkdir certs crl newcerts private;
+           chmod 400 private;
+           touch index.txt;
+           touch index.txt.attr;
+           awk -v min=00000000 -v max=99999990 'BEGIN{srand(); print int(min+rand()*(max-min+1))}' > serial;
+      
+      - name: Remove clone directory      
+        become: true
+        file:
+           path: /root/openvpnfiles
+           state: absent
+      
+      - name: Clone config files
+        become: true
+        git:
+           repo: "https://github.com/eduardoefb/openvpnserver.git"
+           dest: /root/openvpnfiles
+           clone: yes
+      
+      - name: Configure ca openssl.conf, create key
+        become: true
+        shell:           
+           sed 's/\.key\.pem/\.key/g' /root/openvpnfiles/ca_config_sample/openssl.cnf > /root/ca/openssl.cnf;
+           sed -i 's/\.cert\.pem/\.crt/g' /root/ca/openssl.cnf;
+           openssl rand -hex 20 > /root/ca/ca_pass;
+           chmod 000 /root/ca/ca_pass;
+           openssl genrsa -aes256 -out /root/ca/private/ca.key -passout pass:$(cat /root/ca/ca_pass) 4096;
+           chmod 400 /root/ca/private/ca.key;
+           openssl req -config /root/ca/openssl.cnf -key /root/ca/private/ca.key -passin pass:$(cat /root/ca/ca_pass) -new -x509 -days 3650 -sha512 -extensions v3_ca -subj {{ca_subject}} -out /root/ca/certs/ca.crt;           
+
+      - name: Create Directories
+        become: true
+        file:
+           path: /root/ca/intermediate
+           state: directory
+           mode: 700
+
+      - name: Create Directories
+        become: true           
+        file:
+           path: /root/ca/intermediate/certs
+           state: directory
+           mode: 700         
+
+      - name: Create Directories
+        become: true
+        file:
+           path: /root/ca/intermediate/crl
+           state: directory
+           mode: 700         
+
+      - name: Create Directories
+        become: true
+        file:
+           path: /root/ca/intermediate/csr
+           state: directory
+           mode: 700         
+
+      - name: Create Directories
+        become: true
+        file:
+           path: /root/ca/intermediate/newcerts
+           state: directory
+           mode: 700
+                    
+      - name: Create Directories
+        become: true                    
+        file:
+           path: /root/ca/intermediate/private
+           state: directory
+           mode: 700    
+           
+      - name: Configure intermediate CA
+        become: true
+        shell:
+           touch /root/ca/intermediate/index.txt;
+           touch /root/ca/intermediate/index.txt.attr;
+           awk -v min=10000000 -v max=99999990 'BEGIN{srand(); print int(min+rand()*(max-min+1))}' > /root/ca/intermediate/crlnumber;
+           cat /root/ca/intermediate/crlnumber > /root/ca/intermediate/serial;
+           cat /root/ca/intermediate/crlnumber > /root/ca/intermediate/certs/intermediate.srl;
+           sed 's/\.key\.pem/\.key/g' /root/openvpnfiles/ca_config_sample/openssl_intermediate.cnf > /root/ca/intermediate/openssl.cnf;
+           sed -i 's/\.cert\.pem/\.crt/g' /root/ca/intermediate/openssl.cnf;
+           intca_pass=$(openssl rand -hex 20);      
+           echo $intca_pass > /root/ca/intca_pass;
+           openssl genrsa -aes256 -out /root/ca/intermediate/private/intermediate.key -passout pass:$intca_pass 4096;
+           chmod 400 /root/ca/intermediate/private/intermediate.key;
+           openssl req -config /root/ca/intermediate/openssl.cnf -new -sha512 -key /root/ca/intermediate/private/intermediate.key -passin pass:$intca_pass -subj {{int_ca_subject}} -out /root/ca/intermediate/csr/intermediate.csr;
+           openssl ca -batch -config /root/ca/openssl.cnf -extensions v3_intermediate_ca -days 3650 -notext -md sha512 -in /root/ca/intermediate/csr/intermediate.csr -passin pass:$(cat /root/ca/ca_pass) -out /root/ca/intermediate/certs/intermediate.crt;
+           cat /root/ca/intermediate/certs/intermediate.crt /root/ca/certs/ca.crt > /root/ca/intermediate/certs/ca-chain.crt;
+           chmod 444 /root/ca/intermediate/certs/ca-chain.crt;
+
